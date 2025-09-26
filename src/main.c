@@ -7,6 +7,7 @@
 
 typedef uint8_t byte;
 
+/* hardware pin mapping */
 #define BTN1    PD2
 #define BTN2    PD3
 #define LED1    PD4
@@ -25,142 +26,253 @@ typedef uint8_t byte;
 #define DIG3    PC3
 #define DIG4    PC4
 
+/* global time counter (milliseconds) */
+volatile unsigned long g_millis_count = 0;
 
-// Timer voor milliseconden
-volatile unsigned long millis_count = 0;
-ISR(TIMER0_COMPA_vect) { millis_count++; }
+/* ISR */
+ISR(TIMER0_COMPA_vect)
+{
+    g_millis_count++;
+}
 
-
-unsigned long millis(void) {
+/* geeft milliseconden sinds start */
+unsigned long millis(void)
+{
     unsigned long m;
-    cli(); m = millis_count; sei();
+    cli();
+    m = g_millis_count;
+    sei();
     return m;
 }
-void init_timer0(void) {
-    TCCR0A = (1<<WGM01);
+
+static void init_timer0(void)
+{
+    TCCR0A = (1 << WGM01);
     OCR0A = 249;
-    TIMSK0 = (1<<OCIE0A);
-    TCCR0B = (1<<CS01)|(1<<CS00);
+    TIMSK0 = (1 << OCIE0A);
+    TCCR0B = (1 << CS01) | (1 << CS00);
     sei();
 }
 
+/* button state variablen */
+static int g_button_state1 = 1;
+static int g_button_state2 = 1;
+static int g_last_button_state1 = 1;
+static int g_last_button_state2 = 1;
 
-// Variabelen voor knoptoestand
-int buttonState1 = 1;
-int buttonState2 = 1;
-int lastButtonState1 = 1;
-int lastButtonState2 = 1;
+static int g_counter = 0;
+static bool g_b_waiting_for_button2 = false;
 
+static unsigned long g_time_button1 = 0;
+static unsigned long g_time_button2 = 0;
+static unsigned long g_delta_time = 0;
 
-// Meetvariabelen
-int counter = 0;
-bool waitingForButton2 = false;
-
-unsigned long timeButton1 = 0;
-unsigned long timeButton2 = 0;
-unsigned long deltaTime = 0;
-
-const float afstand = 0.6; //Afstand in meters tussen telslangen
-bool snelheidGeldig = false;
+static const float g_distance_m = 0.6f; /* afstand telslangen */
+static bool g_b_speed_valid = false;
 
 
-byte patterns[] = {
-  0b1111110, // 0
-  0b0110000, // 1
-  0b1101101, // 2
-  0b1111001, // 3
-  0b0110011, // 4
-  0b1011011, // 5
-  0b1011111, // 6
-  0b1110000, // 7
-  0b1111111, // 8
-  0b1111011, // 9
-  0b1001111, // A
-  0b0011111 // b
+static byte g_patterns[] =
+{
+    0b1111110, /* 0 */
+    0b0110000, /* 1 */
+    0b1101101, /* 2 */
+    0b1111001, /* 3 */
+    0b0110011, /* 4 */
+    0b1011011, /* 5 */
+    0b1011111, /* 6 */
+    0b1110000, /* 7 */
+    0b1111111, /* 8 */
+    0b1111011, /* 9 */
+    0b1001111, /* A */
+    0b0011111  /* b */
 };
 
-int displayBuffer[4] = {0,0,0,0}; // Waarden 4 digits
+/* display buffer (4 digits) */
+static int g_display_buffer[4] = {0, 0, 0, 0};
 
-void showBinary(int value) {
-  if (value & 0x01) PORTD |= (1<<LED1); else PORTD &= ~(1<<LED1);
-  if (value & 0x02) PORTD |= (1<<LED2); else PORTD &= ~(1<<LED2);
-  if (value & 0x04) PORTD |= (1<<LED3); else PORTD &= ~(1<<LED3);
-  if (value & 0x08) PORTD |= (1<<LED4); else PORTD &= ~(1<<LED4);
-}
-
-void showSnelheid(float snelheid) {
-  int value = (int)(snelheid + 0.5);
-  if (value > 9999) value = 9999;
-  if (value < 0) value = 0;
-  for (int i=0;i<4;i++){ displayBuffer[i] = value%10; value/=10; }
-}
-
-void clearDisplay() { for(int i=0;i<4;i++) displayBuffer[i]=0; }
-
-void showDigit(int digitIndex, int patternIndex) {
-  PORTC |= (1<<DIG1)|(1<<DIG2)|(1<<DIG3)|(1<<DIG4);
-  byte pattern = patterns[patternIndex];
-  for (int i=0;i<6;i++){
-    if (pattern & (1<<(6-i))) PORTB |= (1<<i);
-    else PORTB &= ~(1<<i);
-  }
-  if (pattern & 1) PORTC |= (1<<SEG_G); else PORTC &= ~(1<<SEG_G);
-  switch(digitIndex){
-    case 0: PORTC &= ~(1<<DIG1); break;
-    case 1: PORTC &= ~(1<<DIG2); break;
-    case 2: PORTC &= ~(1<<DIG3); break;
-    case 3: PORTC &= ~(1<<DIG4); break;
-  }
-  _delay_ms(2);
-}
-
-void InitializeIO(void) {
-  DDRD &= ~((1<<BTN1)|(1<<BTN2));
-  PORTD |= (1<<BTN1)|(1<<BTN2);
-  DDRD |= (1<<LED1)|(1<<LED2)|(1<<LED3)|(1<<LED4);
-  DDRB |= (1<<SEG_A)|(1<<SEG_B)|(1<<SEG_C)|(1<<SEG_D)|(1<<SEG_E)|(1<<SEG_F);
-  DDRC |= (1<<SEG_G)|(1<<DIG1)|(1<<DIG2)|(1<<DIG3)|(1<<DIG4);
-  clearDisplay();
-}
-
-int main(void) {
-  init_timer0();
-  InitializeIO();
-
-  while(1) {
-    // Refresh display
-    for(int d=0; d<4; d++) {
-      if (snelheidGeldig) showDigit(d, displayBuffer[d]);
-      else PORTC |= (1<<DIG1)|(1<<DIG2)|(1<<DIG3)|(1<<DIG4);
+static void show_binary(int value)
+{
+    if ((value & 0x01) != 0)
+    {
+        PORTD |= (1 << LED1);
+    }
+    else
+    {
+        PORTD &= ~(1 << LED1);
     }
 
-    // Knoppen uitlezen (actief laag door pull-up)
-    buttonState1 = (PIND & (1<<BTN1)) ? 1 : 0;
-    buttonState2 = (PIND & (1<<BTN2)) ? 1 : 0;
-
-    // Eerste knop ingedrukt
-    if (buttonState1==0 && lastButtonState1==1) {
-      waitingForButton2 = true;
-      timeButton1 = millis();
+    if ((value & 0x02) != 0)
+    {
+        PORTD |= (1 << LED2);
+    }
+    else
+    {
+        PORTD &= ~(1 << LED2);
     }
 
-    // Tweede knop ingedrukt
-    if (buttonState2==0 && lastButtonState2==1 && waitingForButton2) {
-      timeButton2 = millis();
-      deltaTime = timeButton2 - timeButton1;      // Verschil in ms
-      counter++; if(counter>15) counter=0;        // Teller loopt tot 15
-      float tijdSec = deltaTime/1000.0;           // Tijd in seconden
-      float snelheid = (afstand/tijdSec)*3.6;     // Snelheid in km/h
-      showBinary(counter);                        // Teller in binaire leds
-      if (counter>0){ showSnelheid(snelheid); snelheidGeldig=true; }
-      else { clearDisplay(); snelheidGeldig=false; }
-      waitingForButton2=false;
+    if ((value & 0x04) != 0)
+    {
+        PORTD |= (1 << LED3);
+    }
+    else
+    {
+        PORTD &= ~(1 << LED3);
     }
 
-    // Vorige knoptoestand bijwerken
-    lastButtonState1 = buttonState1;
-    lastButtonState2 = buttonState2;
+    if ((value & 0x08) != 0)
+    {
+        PORTD |= (1 << LED4);
+    }
+    else
+    {
+        PORTD &= ~(1 << LED4);
+    }
+}
 
-    _delay_ms(5); // Kleine vertraging (debounce en CPU rust)
-  }
+static void show_speed(float speed_kmh)
+{
+    int value = (int)(speed_kmh + 0.5f);
+
+    if (value > 9999)
+    {
+        value = 9999;
+    }
+
+    if (value < 0)
+    {
+        value = 0;
+    }
+
+    for (int i = 0; i < 4; i++)
+    {
+        g_display_buffer[i] = value % 10;
+        value /= 10;
+    }
+}
+
+static void clear_display(void)
+{
+    for (int i = 0; i < 4; i++)
+    {
+        g_display_buffer[i] = 0;
+    }
+}
+
+static void show_digit(int digit_index, int pattern_index)
+{
+    PORTC |= (1 << DIG1) | (1 << DIG2) | (1 << DIG3) | (1 << DIG4);
+
+    byte pattern = g_patterns[pattern_index];
+
+    for (int i = 0; i < 6; i++)
+    {
+        if ((pattern & (1 << (6 - i))) != 0)
+        {
+            PORTB |= (1 << i);
+        }
+        else
+        {
+            PORTB &= ~(1 << i);
+        }
+    }
+
+    if ((pattern & 1) != 0)
+    {
+        PORTC |= (1 << SEG_G);
+    }
+    else
+    {
+        PORTC &= ~(1 << SEG_G);
+    }
+
+    switch (digit_index)
+    {
+        case 0: PORTC &= ~(1 << DIG1); break;
+        case 1: PORTC &= ~(1 << DIG2); break;
+        case 2: PORTC &= ~(1 << DIG3); break;
+        case 3: PORTC &= ~(1 << DIG4); break;
+        default: break;
+    }
+
+    _delay_ms(2);
+}
+
+static void initialize_io(void)
+{
+
+    DDRD &= ~((1 << BTN1) | (1 << BTN2));
+    PORTD |= (1 << BTN1) | (1 << BTN2);
+
+    DDRD |= (1 << LED1) | (1 << LED2) | (1 << LED3) | (1 << LED4);
+    DDRB |= (1 << SEG_A) | (1 << SEG_B) | (1 << SEG_C) |
+            (1 << SEG_D) | (1 << SEG_E) | (1 << SEG_F);
+    DDRC |= (1 << SEG_G) | (1 << DIG1) | (1 << DIG2) |
+            (1 << DIG3) | (1 << DIG4);
+
+    clear_display();
+}
+
+int main(void)
+{
+    init_timer0();
+    initialize_io();
+
+    while (1)
+    {
+        for (int d = 0; d < 4; d++)
+        {
+            if (g_b_speed_valid)
+            {
+                show_digit(d, g_display_buffer[d]);
+            }
+            else
+            {
+                PORTC |= (1 << DIG1) | (1 << DIG2) | (1 << DIG3) | (1 << DIG4);
+            }
+        }
+
+        g_button_state1 = ((PIND & (1 << BTN1)) != 0) ? 1 : 0;
+        g_button_state2 = ((PIND & (1 << BTN2)) != 0) ? 1 : 0;
+
+        if ((g_button_state1 == 0) && (g_last_button_state1 == 1))
+        {
+            g_b_waiting_for_button2 = true;
+            g_time_button1 = millis();
+        }
+
+        if ((g_button_state2 == 0) && (g_last_button_state2 == 1) && g_b_waiting_for_button2)
+        {
+            g_time_button2 = millis();
+            g_delta_time = g_time_button2 - g_time_button1;
+
+            g_counter++;
+            if (g_counter > 15)
+            {
+                g_counter = 0;
+            }
+
+            float time_s = g_delta_time / 1000.0f;
+            float speed_kmh = (g_distance_m / time_s) * 3.6f;
+
+            show_binary(g_counter);
+
+            if (g_counter > 0)
+            {
+                show_speed(speed_kmh);
+                g_b_speed_valid = true;
+            }
+            else
+            {
+                clear_display();
+                g_b_speed_valid = false;
+            }
+
+            g_b_waiting_for_button2 = false;
+        }
+
+        g_last_button_state1 = g_button_state1;
+        g_last_button_state2 = g_button_state2;
+
+        _delay_ms(5);
+    }
 }
